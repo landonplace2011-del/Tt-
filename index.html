@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TapTrials Plain</title>
+<link href="https://cdn.jsdelivr.net/npm/tailwindcss@3.3.3/dist/tailwind.min.css" rel="stylesheet">
+<style>
+body { margin:0; background:#0a0a0f; color:white; font-family:sans-serif; overflow-x:hidden; }
+.floating { position:absolute; font-weight:bold; pointer-events:none; animation:floatUp 1s forwards; font-size:1.2rem; }
+@keyframes floatUp { 0% {opacity:1; transform:translateY(0px);} 100% {opacity:0; transform:translateY(-50px);} }
+.shake { animation:shake 0.1s; }
+@keyframes shake {0%{transform:translateX(-2px);}25%{transform:translateX(2px);}50%{transform:translateX(-2px);}75%{transform:translateX(2px);}100%{transform:translateX(0);}}
+.tab { cursor:pointer; padding:0.5rem 1rem; border-radius:0.25rem; }
+.tab-active { background-color:#7c3aed; }
+</style>
+</head>
+<body>
+<div class="min-h-screen flex flex-col relative" id="gameContainer">
+  <div class="px-4 pt-4 pb-2">
+    <h1 class="text-3xl font-black bg-gradient-to-r from-violet-400 via-purple-400 to-cyan-400 bg-clip-text text-transparent">TapTrials</h1>
+    <div class="mt-2" id="statsText">Trial: 1 | Power: 0 | Focus: 100/100 | Combo: 0</div>
+    <div class="mt-2 flex gap-2">
+      <button class="px-2 py-1 bg-green-600 rounded" id="resetBtn">Reset</button>
+      <button class="px-2 py-1 bg-blue-600 rounded" id="beyondBtn">Start Beyond Mode</button>
+    </div>
+  </div>
+  <div class="flex gap-2 px-4 mt-2">
+    <div class="tab tab-active" data-tab="game">Game</div>
+    <div class="tab" data-tab="upgrades">Upgrades</div>
+    <div class="tab" data-tab="stats">Stats</div>
+  </div>
+  <div class="flex-1 flex items-center justify-center relative px-4 mt-4" id="mainContent">
+    <!-- Game content dynamically inserted here -->
+  </div>
+</div>
+
+<script>
+// ----------------------------
+// Game State
+// ----------------------------
+let gameState = {
+  power: 0,
+  totalPower: 0,
+  focus: 100,
+  maxFocus: 100,
+  focusRegen: 2,
+  tapPower: 1,
+  autoPower: 0,
+  critChance: 5,
+  critMultiplier: 2,
+  currentTrial: 1,
+  trialProgress: 0,
+  resets: 0,
+  resetPoints: 0,
+  totalResets: 0,
+  hardcoreMode: false,
+  trialsBeyondMode: false,
+  currentModifiers: [],
+  totalTaps: 0,
+  totalCrits: 0,
+  highestTrial: 1,
+  upgrades: {},
+  lastOnline: Date.now()
+};
+
+const upgradeList = [
+  {id:'tapPower',name:'Tap Power',effect:1,cost:10},
+  {id:'autoPower',name:'Auto Power',effect:0.5,cost:20},
+  {id:'critChance',name:'Crit Chance',effect:5,cost:30},
+  {id:'critMultiplier',name:'Crit Multiplier',effect:0.5,cost:50},
+  {id:'maxFocus',name:'Max Focus',effect:10,cost:40},
+  {id:'focusRegen',name:'Focus Regen',effect:1,cost:25},
+];
+
+let comboCount = 0;
+let lastTapTime = 0;
+let floatingId = 0;
+let activeBoss = null;
+
+// ----------------------------
+// Helpers
+// ----------------------------
+function saveGame() { localStorage.setItem('tapTrials_save', JSON.stringify({...gameState,lastOnline:Date.now()})); }
+function loadGame() { const saved = localStorage.getItem('tapTrials_save'); if(saved){ try{gameState=JSON.parse(saved)}catch{} } }
+function trialRequirement(){ 
+  const base=100; const scaling=Math.pow(1.5,gameState.currentTrial-1); 
+  const resetBonus=1+(gameState.resets*0.1);
+  const beyond=gameState.trialsBeyondMode?2.5:1;
+  return Math.floor(base*scaling/resetBonus*beyond);
+}
+function generateModifiers(){ 
+  const all=[{id:'no-crits'},{id:'focus-drain'},{id:'reduced-auto'},{id:'combo-reset'},{id:'high-requirement'},{id:'no-regen'}];
+  return all.sort(()=>Math.random()-0.5).slice(0,2); 
+}
+
+// ----------------------------
+// DOM Elements
+// ----------------------------
+const statsText = document.getElementById('statsText');
+const mainContent = document.getElementById('mainContent');
+const resetBtn = document.getElementById('resetBtn');
+const beyondBtn = document.getElementById('beyondBtn');
+const tabs = document.querySelectorAll('.tab');
+
+// ----------------------------
+// Game Functions
+// ----------------------------
+function updateStats(){ 
+  statsText.textContent=`Trial: ${gameState.currentTrial} | Power: ${Math.floor(gameState.power)} | Focus: ${Math.floor(gameState.focus)}/${gameState.maxFocus} | Combo: ${comboCount}`;
+}
+
+function createTapButton(){
+  mainContent.innerHTML='';
+  const btn = document.createElement('button');
+  btn.textContent='TAP';
+  btn.className='px-20 py-20 bg-purple-700 rounded-full text-white font-bold text-2xl';
+  btn.onclick=handleTap;
+  mainContent.appendChild(btn);
+}
+
+function handleTap(e){
+  let focusCost = 1;
+  if(gameState.currentModifiers.some(m=>m.id==='focus-drain')) focusCost*=2;
+  if(gameState.focus<focusCost) return;
+
+  const now = Date.now();
+  const timeSince = now-lastTapTime;
+  if(timeSince<500) comboCount=Math.min(comboCount+1,50);
+  else if(timeSince>1500) comboCount=0;
+  lastTapTime=now;
+
+  const critsDisabled = gameState.currentModifiers.some(m=>m.id==='no-crits');
+  const isCrit = !critsDisabled && Math.random()*100<gameState.critChance;
+  let power = gameState.tapPower*(1+comboCount*0.02);
+  if(isCrit) power*=gameState.critMultiplier;
+  power = Math.floor(power);
+
+  const rect = e.target.getBoundingClientRect();
+  const x = e.clientX-rect.left;
+  const y = e.clientY-rect.top;
+  const span = document.createElement('div');
+  span.className='floating';
+  span.style.left=x+'px';
+  span.style.top=y+'px';
+  span.style.color=isCrit?'yellow':'white';
+  span.textContent='+'+power;
+  mainContent.appendChild(span);
+  setTimeout(()=>span.remove(),1000);
+
+  if(isCrit){
+    mainContent.classList.add('shake');
+    setTimeout(()=>mainContent.classList.remove('shake'),100);
+  }
+
+  gameState.power+=power;
+  gameState.totalPower+=power;
+  gameState.focus=Math.max(0,gameState.focus-focusCost);
+  gameState.trialProgress+=power;
+  gameState.totalTaps++;
+  if(isCrit) gameState.totalCrits++;
+
+  if(gameState.trialProgress>=trialRequirement()){
+    if(gameState.currentTrial%10===0 && !activeBoss){
+      startBoss();
+    }else if(!activeBoss){
+      completeTrial();
+    }
+  }
+
+  updateStats();
+}
+
+function completeTrial(){
+  gameState.currentTrial++;
+  if(gameState.trialsBeyondMode && gameState.currentTrial%5===0){
+    gameState.currentModifiers=generateModifiers();
+  }else{
+    gameState.currentModifiers=[];
+  }
+  gameState.trialProgress=0;
+  if(gameState.currentTrial>gameState.highestTrial) gameState.highestTrial=gameState.currentTrial;
+  updateStats();
+}
+
+function startBoss(){
+  activeBoss={health:100,maxHealth:100};
+  mainContent.innerHTML='';
+  const div = document.createElement('div');
+  div.innerHTML=`<div class="text-xl font-bold mb-2">Boss Trial ${gameState.currentTrial}</div>
+  <div class="w-64 h-4 bg-gray-700 rounded overflow-hidden"><div id="bossHealth" class="h-4 bg-red-600" style="width:100%"></div></div>
+  <button id="attackBoss" class="mt-4 px-6 py-2 bg-red-700 rounded">Attack Boss</button>`;
+  mainContent.appendChild(div);
+  document.getElementById('attackBoss').onclick=attackBoss;
+}
+
+function attackBoss(){
+  const damage=gameState.tapPower*(1+gameState.resets*0.2);
+  activeBoss.health=Math.max(0,activeBoss.health-damage/10);
+  document.getElementById('bossHealth').style.width=(activeBoss.health/activeBoss.maxHealth*100)+'%';
+  if(activeBoss.health<=0){ 
+    activeBoss=null; 
+    completeTrial();
+    createTapButton();
+  }
+}
+
+// ----------------------------
+// Upgrades Tab
+// ----------------------------
+function createUpgrades(){
+  mainContent.innerHTML='';
+  upgradeList.forEach(u=>{
+    const div = document.createElement('div');
+    div.className='p-2 bg-gray-800 rounded flex justify-between items-center mt-2';
+    div.innerHTML=`<div>${u.name} (Lv ${gameState.upgrades[u.id]||0})</div>
+    <button class="px-2 py-1 bg-green-600 rounded">Buy (${u.cost})</button>`;
+    div.querySelector('button').onclick=()=>buyUpgrade(u);
+    mainContent.appendChild(div);
+  });
+}
+
+function buyUpgrade(u){
+  if(gameState.power<u.cost) return;
+  gameState.power-=u.cost;
+  gameState.upgrades[u.id]=(gameState.upgrades[u.id]||0)+1;
+  switch(u.id){
+    case 'tapPower': gameState.tapPower+=u.effect; break;
+    case 'autoPower': gameState.autoPower+=u.effect; break;
+    case 'critChance': gameState.critChance+=u.effect; break;
+    case 'critMultiplier': gameState.critMultiplier+=u.effect; break;
+    case 'maxFocus': gameState.maxFocus+=u.effect; gameState.focus+=u.effect; break;
+    case 'focusRegen': gameState.focusRegen+=u.effect; break;
+  }
+  createUpgrades();
+  updateStats();
+}
+
+// ----------------------------
+// Stats Tab
+// ----------------------------
+function createStats(){
+  mainContent.innerHTML=`<div class="text-left mt-4">
+  <div>Total Taps: ${gameState.totalTaps}</div>
+  <div>Total Crits: ${gameState.totalCrits}</div>
+  <div>Highest Trial: ${gameState.highestTrial}</div>
+  <div>Resets: ${gameState.resets}</div>
+  </div>`;
+}
+
+// ----------------------------
+// Tabs Click
+// ----------------------------
+tabs.forEach(tab=>{
+  tab.onclick=()=>{
+    tabs.forEach(t=>t.classList.remove('tab-active'));
+    tab.classList.add('tab-active');
+    if(tab.dataset.tab==='game') createTapButton();
+    else if(tab.dataset.tab==='upgrades') createUpgrades();
+    else createStats();
+  }
+});
+
+// ----------------------------
+// Buttons
+// ----------------------------
+resetBtn.onclick=()=>{
+  gameState.resets++;
+  gameState.totalResets++;
+  gameState.resetPoints+=Math.floor(Math.sqrt(gameState.currentTrial));
+  gameState.power=0; gameState.tapPower=1; gameState.autoPower=0; gameState.focus=gameState.maxFocus; gameState.currentTrial=1;
+  updateStats();
+};
+beyondBtn.onclick=()=>{
+  gameState.trialsBeyondMode=!gameState.trialsBeyondMode;
+  gameState.currentModifiers=gameState.trialsBeyondMode?generateModifiers():[];
+  beyondBtn.textContent=gameState.trialsBeyondMode?'End Beyond Mode':'Start Beyond Mode';
+  updateStats();
+};
+
+// ----------------------------
+// Auto Focus Regen
+// ----------------------------
+setInterval(()=>{
+  if(!gameState.currentModifiers.some(m=>m.id==='no-regen')){
+    gameState.focus=Math.min(gameState.maxFocus,gameState.focus+gameState.focusRegen);
+    updateStats();
+  }
+},1000);
+
+// ----------------------------
+// Auto Power
+// ----------------------------
+setInterval(()=>{
+  if(gameState.autoPower>0){
+    const power = gameState.currentModifiers.some(m=>m.id==='reduced-auto')?gameState.autoPower*0.5:gameState.autoPower;
+    gameState.power+=power;
+    gameState.totalPower+=power;
+    gameState.trialProgress+=power;
+    updateStats();
+  }
+},1000);
+
+// ----------------------------
+// Initial Setup
+// ----------------------------
+loadGame();
+updateStats();
+createTapButton();
+setInterval(saveGame,5000);
+</script>
+</body>
+</html>
